@@ -1,13 +1,12 @@
 // api/decide.js
 const { decideRetries } = require('../lib/smart-retry-core');
 
-// Helper para leer JSON del body en una Node.js Function (no hay req.body)
-async function readJsonBody(req) {
+// Fallback por si req.body viene vacío (no debería en Vercel, pero por si acaso)
+async function readJsonBodyFallback(req) {
   return new Promise((resolve, reject) => {
     let data = '';
     req.on('data', chunk => {
       data += chunk;
-      // protección básica: 10MB
       if (data.length > 10 * 1024 * 1024) {
         reject(new Error('Body too large'));
       }
@@ -42,14 +41,17 @@ module.exports = async (req, res) => {
       return res.end(JSON.stringify({ error: 'Unauthorized' }));
     }
 
-    let body;
-    try {
-      body = await readJsonBody(req);
-    } catch (e) {
-      console.error('Error parsing JSON body:', e);
-      res.statusCode = 400;
-      res.setHeader('Content-Type', 'application/json');
-      return res.end(JSON.stringify({ error: 'Invalid JSON', message: e.message }));
+    // En Vercel Node.js Functions, req.body normalmente ya viene parseado
+    let body = req.body;
+    if (!body || typeof body !== 'object') {
+      try {
+        body = await readJsonBodyFallback(req);
+      } catch (e) {
+        console.error('Error parsing JSON body:', e);
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        return res.end(JSON.stringify({ error: 'Invalid JSON', message: e.message }));
+      }
     }
 
     const loans = Array.isArray(body.loans) ? body.loans : [];
