@@ -1,6 +1,8 @@
 {
   "version": 2,
-  "routes": [
-    { "src": "/api/decide", "dest": "/api/decide.js" }
-  ]
+  "functions": {
+    "api/*.js": {
+      "runtime": "nodejs20.x"
+    }
+  }
 }
