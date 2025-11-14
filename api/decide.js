@@ -1,7 +1,17 @@
 // api/decide.js
 const { decideRetries } = require('../lib/smart-retry-core');
 
-// Fallback por si req.body viene vacío (no debería en Vercel, pero por si acaso)
+function setCors(res) {
+  // En demo puedes dejar "*"; en producción mejor limitar al dominio del front
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, x-api-key'
+  );
+}
+
+// Fallback por si req.body viniera vacío
 async function readJsonBodyFallback(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -26,6 +36,15 @@ async function readJsonBodyFallback(req) {
 
 module.exports = async (req, res) => {
   try {
+    // Siempre poner CORS
+    setCors(res);
+
+    // Preflight CORS
+    if (req.method === 'OPTIONS') {
+      res.statusCode = 204; // No Content
+      return res.end();
+    }
+
     if (req.method !== 'POST') {
       res.statusCode = 405;
       res.setHeader('Content-Type', 'application/json');
@@ -41,7 +60,7 @@ module.exports = async (req, res) => {
       return res.end(JSON.stringify({ error: 'Unauthorized' }));
     }
 
-    // En Vercel Node.js Functions, req.body normalmente ya viene parseado
+    // En Vercel normalmente req.body ya existe, pero usamos fallback por si acaso
     let body = req.body;
     if (!body || typeof body !== 'object') {
       try {
@@ -50,7 +69,9 @@ module.exports = async (req, res) => {
         console.error('Error parsing JSON body:', e);
         res.statusCode = 400;
         res.setHeader('Content-Type', 'application/json');
-        return res.end(JSON.stringify({ error: 'Invalid JSON', message: e.message }));
+        return res.end(
+          JSON.stringify({ error: 'Invalid JSON', message: e.message })
+        );
       }
     }
 
@@ -60,14 +81,25 @@ module.exports = async (req, res) => {
     if (!Array.isArray(loans) || !Array.isArray(txs)) {
       res.statusCode = 400;
       res.setHeader('Content-Type', 'application/json');
-      return res.end(JSON.stringify({ error: 'Bad request: loans and txs must be arrays' }));
+      return res.end(
+        JSON.stringify({
+          error: 'Bad request: loans and txs must be arrays'
+        })
+      );
     }
 
     if (typeof decideRetries !== 'function') {
-      console.error('decideRetries is not a function. Check smart-retry-core export.');
+      console.error(
+        'decideRetries is not a function. Check smart-retry-core export.'
+      );
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json');
-      return res.end(JSON.stringify({ error: 'internal_error', message: 'Decision engine not available' }));
+      return res.end(
+        JSON.stringify({
+          error: 'internal_error',
+          message: 'Decision engine not available'
+        })
+      );
     }
 
     const decisions = decideRetries(loans, txs, body.config || {});
