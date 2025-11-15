@@ -5,42 +5,57 @@ const { supabaseAdmin } = require('../lib/supabase-admin');
 async function getHistoryForLoans(loanIds, maxPerLoan = 10) {
   if (!loanIds.length) return [];
 
-  const { data, error } = await supabaseAdmin
-    .from('loan_transactions')
-    .select(
-      `
-      loan_id,
-      payment_request_id,
-      created_at,
-      completed_at,
-      chargeback_at,
-      status,
-      amount,
-      failed_reason,
-      failed_message
-    `
-    )
-    .in('loan_id', loanIds)
-    .order('created_at', { ascending: false });
+  const allRows = [];
+  const chunkSize = 500; // número de loans por batch
 
-  if (error) {
-    console.error('Supabase history error:', error);
-    throw new Error('failed_to_fetch_history');
+  for (let i = 0; i < loanIds.length; i += chunkSize) {
+    const chunk = loanIds.slice(i, i + chunkSize);
+
+    const { data, error } = await supabaseAdmin
+      .from('loan_transactions')
+      .select(`
+        loan_id,
+        payment_request_id,
+        created_at,
+        completed_at,
+        chargeback_at,
+        status,
+        amount,
+        failed_reason,
+        failed_message
+      `)
+      .in('loan_id', chunk)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Supabase history error for chunk', {
+        error,
+        chunkSize: chunk.length,
+      });
+      throw new Error(
+        `supabase_history_error: ${error.message || 'unknown_supabase_error'}`
+      );
+    }
+
+    if (Array.isArray(data)) {
+      allRows.push(...data);
+    }
   }
 
-  // Si quieres limitar N por loan aquí mismo:
+  // Agrupar por loan_id y limitar a maxPerLoan por préstamo
   const buckets = {};
-  for (const row of data || []) {
+  for (const row of allRows) {
     const id = row.loan_id;
+    if (!id) continue;
     if (!buckets[id]) buckets[id] = [];
     if (buckets[id].length < maxPerLoan) {
       buckets[id].push(row);
     }
   }
 
-  // Flatten a un solo array como antes, para decideRetries
   return Object.values(buckets).flat();
 }
+
 
 async function readJsonBodyFallback(req) {
   return new Promise((resolve, reject) => {
