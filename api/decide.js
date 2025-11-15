@@ -62,7 +62,7 @@ module.exports = async (req, res) => {
     let decideLoanV2;
 
     try {
-      const supabaseModule = require('../supabase-admin');
+      const supabaseModule = require('../lib/supabase-admin');
       // Soporta tanto module.exports = supabase como module.exports = { supabase }
       supabase = supabaseModule.supabase ?? supabaseModule;
 
