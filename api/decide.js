@@ -1,7 +1,11 @@
 // api/decide.js
 // Serverless function en Vercel para el motor de decisión Smart Retry v2
 
-const { supabase } = require('../lib/supabase-admin');
+// Import resiliente: soporta tanto module.exports = supabase
+// como module.exports = { supabase }
+const supabaseModule = require('../supabase-admin');
+const supabase = supabaseModule.supabase ?? supabaseModule;
+
 const { decideLoanV2 } = require('../lib/smart-retry-core');
 
 /**
@@ -85,7 +89,7 @@ module.exports = async (req, res) => {
     if (!loans.length) {
       return res.status(400).json({
         error: 'invalid_payload',
-        message: 'Payload must include a non-empty "loans" array',
+        message: 'Payload must include a non-empty \"loans\" array',
       });
     }
 
