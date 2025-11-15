@@ -1,6 +1,9 @@
 // api/decide.js
 // Serverless function en Vercel para el motor de decisión Smart Retry v2
 
+const supabase = require('../lib/supabase-admin');
+const { decideLoanV2 } = require('../lib/smart-retry-core');
+
 /**
  * Construye features de histórico para un loan a partir de sus transacciones.
  * rows: array de { status, failed_message, created_at, chargeback_at? }
@@ -57,29 +60,6 @@ function buildHistoryFeaturesForLoan(rows) {
  */
 module.exports = async (req, res) => {
   try {
-    // 🔹 1) Cargar dependencias dentro del handler para poder capturar errores
-    let supabase;
-    let decideLoanV2;
-
-    try {
-      const supabaseModule = require('../lib/supabase-admin');
-      // Soporta tanto module.exports = supabase como module.exports = { supabase }
-      supabase = supabaseModule.supabase ?? supabaseModule;
-
-      const core = require('../lib/smart-retry-core');
-      decideLoanV2 = core.decideLoanV2;
-      if (typeof decideLoanV2 !== 'function') {
-        throw new Error('decideLoanV2 is not a function from ../lib/smart-retry-core');
-      }
-    } catch (loadErr) {
-      console.error('Error loading dependencies in /api/decide:', loadErr);
-      return res.status(500).json({
-        error: 'dependency_load_error',
-        message: loadErr instanceof Error ? loadErr.message : String(loadErr),
-      });
-    }
-
-    // 🔹 2) Validar método
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST');
       return res
@@ -87,7 +67,7 @@ module.exports = async (req, res) => {
         .json({ error: 'method_not_allowed', message: 'Use POST /api/decide' });
     }
 
-    // 🔹 3) Parsear body
+    // Aseguramos que el body sea un objeto
     let body = req.body || {};
     if (typeof body === 'string') {
       try {
@@ -109,7 +89,7 @@ module.exports = async (req, res) => {
       });
     }
 
-    // 🔹 4) Lista de loan_ids de la cartera actual
+    // 1) Lista de loan_ids de la cartera actual
     const loanIds = loans
       .map((l) => (l.loan_id != null ? String(l.loan_id).trim() : ''))
       .filter((id) => id !== '');
@@ -121,32 +101,20 @@ module.exports = async (req, res) => {
       });
     }
 
-    // 🔹 5) Traer histórico de transacciones en una sola query (IN)
+    // 2) Traer histórico de transacciones en una sola query (IN)
     // Ajusta 'payment_requests' al nombre real de tu tabla en Supabase.
-    let txRows, txError;
-    try {
-      const result = await supabase
-        .from('payment_requests')
-        .select(
-          `
-          loan_id,
-          status,
-          failed_message,
-          created_at,
-          chargeback_at
+    const { data: txRows, error: txError } = await supabase
+      .from('payment_requests')
+      .select(
         `
-        )
-        .in('loan_id', loanIds);
-
-      txRows = result.data;
-      txError = result.error;
-    } catch (callErr) {
-      console.error('Supabase call error in /api/decide:', callErr);
-      return res.status(500).json({
-        error: 'supabase_call_failed',
-        message: callErr instanceof Error ? callErr.message : String(callErr),
-      });
-    }
+        loan_id,
+        status,
+        failed_message,
+        created_at,
+        chargeback_at
+      `
+      )
+      .in('loan_id', loanIds);
 
     if (txError) {
       console.error('Supabase error fetching history:', txError);
@@ -156,7 +124,7 @@ module.exports = async (req, res) => {
       });
     }
 
-    // 🔹 6) Agrupar histórico por loan_id
+    // 3) Agrupar histórico por loan_id
     const historyByLoan = new Map();
     if (Array.isArray(txRows)) {
       for (const row of txRows) {
@@ -169,7 +137,7 @@ module.exports = async (req, res) => {
       }
     }
 
-    // 🔹 7) Para cada loan, construir features + decisión
+    // 4) Para cada loan, construir features + decisión
     const now = new Date();
 
     const decisions = loans.map((loan) => {
