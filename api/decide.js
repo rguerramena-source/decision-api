@@ -104,17 +104,9 @@ module.exports = async (req, res) => {
     // 2) Traer histórico de transacciones en una sola query (IN)
     // Ajusta 'payment_requests' al nombre real de tu tabla en Supabase.
     const { data: txRows, error: txError } = await supabaseAdmin
-      .from('payment_requests')
-      .select(
-        `
-        loan_id,
-        status,
-        failed_message,
-        created_at,
-        chargeback_at
-      `
-      )
-      .in('loan_id', loanIds);
+      .rpc('get_payment_history_by_loans', { 
+        loan_ids_input: loanIds 
+      });
 
     if (txError) {
       console.error('Supabase error fetching history:', txError);
