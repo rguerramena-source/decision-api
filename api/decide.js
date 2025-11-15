@@ -1,7 +1,7 @@
 // api/decide.js
 // Serverless function en Vercel para el motor de decisión Smart Retry v2
 
-const supabase = require('../lib/supabase-admin');
+const { supabaseAdmin } = require('../lib/supabase-admin');
 const { decideLoanV2 } = require('../lib/smart-retry-core');
 
 /**
@@ -103,7 +103,7 @@ module.exports = async (req, res) => {
 
     // 2) Traer histórico de transacciones en una sola query (IN)
     // Ajusta 'payment_requests' al nombre real de tu tabla en Supabase.
-    const { data: txRows, error: txError } = await supabase
+    const { data: txRows, error: txError } = await supabaseAdmin
       .from('payment_requests')
       .select(
         `
