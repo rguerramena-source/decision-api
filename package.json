@@ -2,11 +2,10 @@
   "name": "decision-api",
   "version": "1.0.0",
   "private": true,
-  "dependencies": {
-  "@supabase/supabase-js": "^2.48.0"
-}
   "scripts": {
     "start": "node api/decide.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.48.0"
   }
 }
-
