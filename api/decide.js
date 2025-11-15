@@ -1,157 +1,195 @@
 // api/decide.js
-const { decideRetries } = require('../lib/smart-retry-core');
-const { supabaseAdmin } = require('../lib/supabase-admin');
+// Serverless function en Vercel para el motor de decisión Smart Retry v2
 
-async function getHistoryForLoans(loanIds, maxPerLoan = 10) {
-  if (!loanIds.length) return [];
+const { supabase } = require('../supabase-admin');
+const { decideLoanV2 } = require('../smart-retry-core');
 
-  const allRows = [];
-  const chunkSize = 500; // número de loans por batch
-
-  for (let i = 0; i < loanIds.length; i += chunkSize) {
-    const chunk = loanIds.slice(i, i + chunkSize);
-
-    const { data, error } = await supabaseAdmin
-      .from('loan_transactions')
-      .select(`
-        loan_id,
-        payment_request_id,
-        created_at,
-        completed_at,
-        chargeback_at,
-        status,
-        amount,
-        failed_reason,
-        failed_message
-      `)
-      .in('loan_id', chunk)
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      console.error('Supabase history error for chunk', {
-        error,
-        chunkSize: chunk.length,
-      });
-      throw new Error(
-        `supabase_history_error: ${error.message || 'unknown_supabase_error'}`
-      );
-    }
-
-    if (Array.isArray(data)) {
-      allRows.push(...data);
-    }
+/**
+ * Construye features de histórico para un loan a partir de sus transacciones.
+ * rows: array de { status, failed_message, created_at, chargeback_at? }
+ */
+function buildHistoryFeaturesForLoan(rows) {
+  if (!rows || rows.length === 0) {
+    return {
+      last_req_status: 'new',
+      failed_message: '',
+      intentos_ciclo_actual: 0,
+    };
   }
 
-  // Agrupar por loan_id y limitar a maxPerLoan por préstamo
-  const buckets = {};
-  for (const row of allRows) {
-    const id = row.loan_id;
-    if (!id) continue;
-    if (!buckets[id]) buckets[id] = [];
-    if (buckets[id].length < maxPerLoan) {
-      buckets[id].push(row);
-    }
-  }
-
-  return Object.values(buckets).flat();
-}
-
-
-async function readJsonBodyFallback(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', chunk => {
-      data += chunk;
-      if (data.length > 10 * 1024 * 1024) {
-        reject(new Error('Body too large'));
-      }
-    });
-    req.on('end', () => {
-      if (!data) return resolve({});
-      try {
-        const json = JSON.parse(data);
-        resolve(json);
-      } catch (e) {
-        reject(new Error('Invalid JSON body'));
-      }
-    });
-    req.on('error', err => reject(err));
-  });
-}
-
-function setCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type, x-api-key'
+  // Ordenamos por fecha por si acaso
+  const ordered = [...rows].sort(
+    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
   );
+
+  let attemptsSinceLastSuccess = 0;
+  let lastStatus = 'new';
+  let lastFailedMessage = '';
+
+  for (const tx of ordered) {
+    const status = (tx.status || '').toLowerCase();
+    lastStatus = status;
+
+    if (status === 'successful') {
+      // Reinicia ciclo en cada éxito
+      attemptsSinceLastSuccess = 0;
+      lastFailedMessage = '';
+    } else {
+      // Cualquier intento no exitoso suma
+      attemptsSinceLastSuccess += 1;
+      if (tx.failed_message) {
+        lastFailedMessage = tx.failed_message;
+      }
+    }
+
+    // Si el esquema usa chargeback_at, forzamos estado chargeback
+    if (tx.chargeback_at) {
+      lastStatus = 'chargeback';
+    }
+  }
+
+  return {
+    last_req_status: lastStatus,
+    failed_message: lastFailedMessage,
+    intentos_ciclo_actual: attemptsSinceLastSuccess,
+  };
 }
 
+/**
+ * Handler principal: recibe { loans: [...] } y devuelve { decisions: [...] }
+ */
 module.exports = async (req, res) => {
   try {
-    setCors(res);
-
-    if (req.method === 'OPTIONS') {
-      res.statusCode = 204;
-      return res.end();
-    }
-
     if (req.method !== 'POST') {
-      res.statusCode = 405;
-      res.setHeader('Content-Type', 'application/json');
-      return res.end(JSON.stringify({ error: 'Method not allowed' }));
+      res.setHeader('Allow', 'POST');
+      return res
+        .status(405)
+        .json({ error: 'method_not_allowed', message: 'Use POST /api/decide' });
     }
 
-    const provided = String(req.headers['x-api-key'] || '');
-    const API_KEY = String(process.env.DECISION_API_KEY || '');
-
-    if (!API_KEY || provided !== API_KEY) {
-      res.statusCode = 401;
-      res.setHeader('Content-Type', 'application/json');
-      return res.end(JSON.stringify({ error: 'Unauthorized' }));
-    }
-
-    let body = req.body;
-    if (!body || typeof body !== 'object') {
-      body = await readJsonBodyFallback(req);
+    // Aseguramos que el body sea un objeto
+    let body = req.body || {};
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch (e) {
+        return res.status(400).json({
+          error: 'invalid_json',
+          message: 'Request body is not valid JSON',
+        });
+      }
     }
 
     const loans = Array.isArray(body.loans) ? body.loans : [];
-    // ya no usamos body.txs; la fuente es Supabase
-    const loanIds = [...new Set(
-      loans
-        .map(l => (l && l.loan_id != null ? String(l.loan_id).trim() : ''))
-        .filter(id => id !== '')
-    )];
 
-    // Traer histórico desde Supabase
-    const historyTxs = await getHistoryForLoans(loanIds, 10);
-
-    if (typeof decideRetries !== 'function') {
-      console.error('decideRetries is not a function');
-      res.statusCode = 500;
-      res.setHeader('Content-Type', 'application/json');
-      return res.end(
-        JSON.stringify({ error: 'internal_error', message: 'Decision engine not available' })
-      );
+    if (!loans.length) {
+      return res.status(400).json({
+        error: 'invalid_payload',
+        message: 'Payload must include a non-empty "loans" array',
+      });
     }
 
-    // Mantenemos la firma decideRetries(loans, txs, config)
-    const decisions = decideRetries(loans, historyTxs, body.config || {});
+    // 1) Lista de loan_ids de la cartera actual
+    const loanIds = loans
+      .map((l) => (l.loan_id != null ? String(l.loan_id).trim() : ''))
+      .filter((id) => id !== '');
 
-    res.statusCode = 200;
-    res.setHeader('Content-Type', 'application/json');
-    return res.end(JSON.stringify({ decisions }));
+    if (!loanIds.length) {
+      return res.status(400).json({
+        error: 'invalid_loans',
+        message: 'All loans must have a non-empty loan_id',
+      });
+    }
+
+    // 2) Traer histórico de transacciones en una sola query (IN)
+    // Ajusta 'payment_requests' al nombre real de tu tabla en Supabase.
+    const { data: txRows, error: txError } = await supabase
+      .from('payment_requests')
+      .select(
+        `
+        loan_id,
+        status,
+        failed_message,
+        created_at,
+        chargeback_at
+      `
+      )
+      .in('loan_id', loanIds);
+
+    if (txError) {
+      console.error('Supabase error fetching history:', txError);
+      return res.status(500).json({
+        error: 'failed_to_fetch_history',
+        message: txError.message || 'Error fetching transaction history from Supabase',
+      });
+    }
+
+    // 3) Agrupar histórico por loan_id
+    const historyByLoan = new Map();
+    if (Array.isArray(txRows)) {
+      for (const row of txRows) {
+        const id = row.loan_id != null ? String(row.loan_id).trim() : '';
+        if (!id) continue;
+        if (!historyByLoan.has(id)) {
+          historyByLoan.set(id, []);
+        }
+        historyByLoan.get(id).push(row);
+      }
+    }
+
+    // 4) Para cada loan, construir features + decisión
+    const now = new Date();
+
+    const decisions = loans.map((loan) => {
+      const loanId = loan.loan_id != null ? String(loan.loan_id).trim() : '';
+      const historyRows = historyByLoan.get(loanId) || [];
+
+      const historyFeatures = buildHistoryFeaturesForLoan(historyRows);
+
+      // Parseo seguro de numéricos
+      const amountRaw =
+        loan.total_amount_outstanding ??
+        loan.totalAmountOutstanding ??
+        0;
+      const overdueRaw =
+        loan.overdue_days ??
+        loan.overdueDays ??
+        0;
+
+      const amount = Number(amountRaw);
+      const overdueDays = Number(overdueRaw);
+
+      const features = {
+        loan_id: loanId,
+        payment_method_bank:
+          loan.payment_method_bank ||
+          loan.paymentMethodBank ||
+          '',
+        total_amount_outstanding: Number.isFinite(amount) ? amount : 0,
+        overdue_days: Number.isFinite(overdueDays) ? overdueDays : 0,
+        overdue_at: loan.overdue_at || loan.overdueAt || null,
+        intentos_ciclo_actual: historyFeatures.intentos_ciclo_actual,
+        last_req_status: historyFeatures.last_req_status,
+        failed_message: historyFeatures.failed_message,
+      };
+
+      const decision = decideLoanV2(features, now);
+
+      return {
+        loan_id: loanId,
+        decision: decision.decision,
+        decision_reason: decision.decision_reason,
+        next_attempt_date: decision.next_attempt_date,
+        features,
+      };
+    });
+
+    return res.status(200).json({ decisions });
   } catch (err) {
-    console.error('decide error', err);
-    res.statusCode = 500;
-    res.setHeader('Content-Type', 'application/json');
-    return res.end(
-      JSON.stringify({
-        error: 'internal_error',
-        message: String(err?.message || err),
-      })
-    );
+    console.error('Internal error in /api/decide:', err);
+    return res.status(500).json({
+      error: 'internal_error',
+      message: err instanceof Error ? err.message : 'Unknown error',
+    });
   }
 };
