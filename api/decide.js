@@ -1,8 +1,8 @@
 // api/decide.js
 // Serverless function en Vercel para el motor de decisión Smart Retry v2
 
-const { supabase } = require('../supabase-admin');
-const { decideLoanV2 } = require('../smart-retry-core');
+const { supabase } = require('../lib/supabase-admin');
+const { decideLoanV2 } = require('../lib/smart-retry-core');
 
 /**
  * Construye features de histórico para un loan a partir de sus transacciones.
