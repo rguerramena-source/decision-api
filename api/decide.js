@@ -2,7 +2,7 @@
 // Serverless function en Vercel para el motor de decisión Smart Retry v2
 
 const { supabaseAdmin } = require('../lib/supabase-admin');
-const { decideLoanV2 } = require('../lib/smart-retry-core');
+const { decideLoanV2, DEFAULT_DECISION_CONFIG } = require('../lib/smart-retry-core');
 
 /**
  * Construye features de histórico para un loan a partir de sus transacciones.
@@ -79,6 +79,20 @@ module.exports = async (req, res) => {
         });
       }
     }
+const bodyConfig =
+  body.config && typeof body.config === 'object' ? body.config : null;
+
+// Mezclamos config del body con el default (lo que no venga se rellena)
+const decisionConfig = bodyConfig
+  ? {
+      ...DEFAULT_DECISION_CONFIG,
+      ...bodyConfig,
+      confidence: {
+        ...DEFAULT_DECISION_CONFIG.confidence,
+        ...(bodyConfig.confidence || {}),
+      },
+    }
+  : DEFAULT_DECISION_CONFIG;
 
     const loans = Array.isArray(body.loans) ? body.loans : [];
 
@@ -177,13 +191,14 @@ console.log(
         failed_message: historyFeatures.failed_message,
       };
 
-      const decision = decideLoanV2(features, now);
+      const decision = decideLoanV2(features, now, decisionConfig);
 
       return {
         loan_id: loanId,
         decision: decision.decision,
         decision_reason: decision.decision_reason,
         next_attempt_date: decision.next_attempt_date,
+        confidence: decision.confidence ?? 0,
         features,
       };
     });
