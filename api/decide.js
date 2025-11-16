@@ -107,6 +107,23 @@ module.exports = async (req, res) => {
       .rpc('get_payment_history_by_loans', { 
         loan_ids_input: loanIds 
       });
+const { data: txRows, error: txError } = await supabaseAdmin
+  .rpc('get_payment_history_by_loans', {
+    loan_ids_input: loanIds,   // esto ya lo tienes
+  });
+
+console.log(
+  'DEBUG_RPC_RESULT',
+  JSON.stringify(
+    {
+      count: Array.isArray(txRows) ? txRows.length : null,
+      sample: Array.isArray(txRows) ? txRows.slice(0, 5) : txRows,
+      error: txError || null,
+    },
+    null,
+    2
+  )
+);
 
     if (txError) {
       console.error('Supabase error fetching history:', txError);
