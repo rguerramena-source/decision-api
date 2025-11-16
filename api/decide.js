@@ -4,10 +4,7 @@
 const { supabaseAdmin } = require('../lib/supabase-admin');
 const { decideLoanV2, DEFAULT_DECISION_CONFIG } = require('../lib/smart-retry-core');
 
-/**
- * Construye features de histórico para un loan a partir de sus transacciones.
- * rows: array de { status, failed_message, created_at, chargeback_at? }
- */
+// Construye features de histórico para un loan a partir de sus transacciones.
 function buildHistoryFeaturesForLoan(rows) {
   if (!rows || rows.length === 0) {
     return {
@@ -17,7 +14,6 @@ function buildHistoryFeaturesForLoan(rows) {
     };
   }
 
-  // Ordenamos por fecha por si acaso
   const ordered = [...rows].sort(
     (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
   );
@@ -28,21 +24,21 @@ function buildHistoryFeaturesForLoan(rows) {
 
   for (const tx of ordered) {
     const status = (tx.status || '').toLowerCase();
+    const failMsg =
+      (tx.failed_message && String(tx.failed_message).trim()) || '';
+
     lastStatus = status;
 
     if (status === 'successful') {
-      // Reinicia ciclo en cada éxito
       attemptsSinceLastSuccess = 0;
       lastFailedMessage = '';
     } else {
-      // Cualquier intento no exitoso suma
       attemptsSinceLastSuccess += 1;
-      if (tx.failed_message) {
-        lastFailedMessage = tx.failed_message;
+      if (failMsg) {
+        lastFailedMessage = failMsg;
       }
     }
 
-    // Si el esquema usa chargeback_at, forzamos estado chargeback
     if (tx.chargeback_at) {
       lastStatus = 'chargeback';
     }
@@ -55,9 +51,6 @@ function buildHistoryFeaturesForLoan(rows) {
   };
 }
 
-/**
- * Handler principal: recibe { loans: [...] } y devuelve { decisions: [...] }
- */
 module.exports = async (req, res) => {
   try {
     if (req.method !== 'POST') {
@@ -79,20 +72,6 @@ module.exports = async (req, res) => {
         });
       }
     }
-const bodyConfig =
-  body.config && typeof body.config === 'object' ? body.config : null;
-
-// Mezclamos config del body con el default (lo que no venga se rellena)
-const decisionConfig = bodyConfig
-  ? {
-      ...DEFAULT_DECISION_CONFIG,
-      ...bodyConfig,
-      confidence: {
-        ...DEFAULT_DECISION_CONFIG.confidence,
-        ...(bodyConfig.confidence || {}),
-      },
-    }
-  : DEFAULT_DECISION_CONFIG;
 
     const loans = Array.isArray(body.loans) ? body.loans : [];
 
@@ -103,7 +82,22 @@ const decisionConfig = bodyConfig
       });
     }
 
-    // 1) Lista de loan_ids de la cartera actual
+    // Config opcional desde el body (para futuros ajustes desde el front)
+    const bodyConfig =
+      body.config && typeof body.config === 'object' ? body.config : null;
+
+    const decisionConfig = bodyConfig
+      ? {
+          ...DEFAULT_DECISION_CONFIG,
+          ...bodyConfig,
+          confidence: {
+            ...DEFAULT_DECISION_CONFIG.confidence,
+            ...(bodyConfig.confidence || {}),
+          },
+        }
+      : DEFAULT_DECISION_CONFIG;
+
+    // Lista de loan_ids de la cartera actual
     const loanIds = loans
       .map((l) => (l.loan_id != null ? String(l.loan_id).trim() : ''))
       .filter((id) => id !== '');
@@ -115,38 +109,33 @@ const decisionConfig = bodyConfig
       });
     }
 
-    // 2) Traer histórico de transacciones en una sola query (IN)
-    // Ajusta 'payment_requests' al nombre real de tu tabla en Supabase.
-    const { data: txRows, error: txError } = await supabaseAdmin
-      .rpc('get_payment_history_by_loans', { 
-        loan_ids_input: loanIds 
-      });
-console.log(
-  'DEBUG_RPC_RESULT',
-  JSON.stringify(
-    {
-      count: Array.isArray(txRows) ? txRows.length : null,
-      sample: Array.isArray(txRows) ? txRows.slice(0, 5) : txRows,
-      error: txError || null,
-    },
-    null,
-    2
-  )
-);
+    // Traer histórico de transacciones vía RPC de Supabase
+    const { data: txRows, error: txError } = await supabaseAdmin.rpc(
+      'get_payment_history_by_loans',
+      {
+        loan_ids_input: loanIds,
+      }
+    );
 
     if (txError) {
       console.error('Supabase error fetching history:', txError);
       return res.status(500).json({
         error: 'failed_to_fetch_history',
-        message: txError.message || 'Error fetching transaction history from Supabase',
+        message:
+          txError.message ||
+          txError.details ||
+          'Error fetching transaction history from Supabase',
       });
     }
 
-    // 3) Agrupar histórico por loan_id
+    // Agrupar histórico por loan_id
     const historyByLoan = new Map();
     if (Array.isArray(txRows)) {
       for (const row of txRows) {
-        const id = row.loan_id != null ? String(row.loan_id).trim() : '';
+        const id =
+          (row.loan_id != null ? String(row.loan_id).trim() : '') ||
+          (row.loanid != null ? String(row.loanid).trim() : '') ||
+          (row.loan != null ? String(row.loan).trim() : '');
         if (!id) continue;
         if (!historyByLoan.has(id)) {
           historyByLoan.set(id, []);
@@ -155,7 +144,6 @@ console.log(
       }
     }
 
-    // 4) Para cada loan, construir features + decisión
     const now = new Date();
 
     const decisions = loans.map((loan) => {
@@ -164,7 +152,6 @@ console.log(
 
       const historyFeatures = buildHistoryFeaturesForLoan(historyRows);
 
-      // Parseo seguro de numéricos
       const amountRaw =
         loan.total_amount_outstanding ??
         loan.totalAmountOutstanding ??
@@ -202,23 +189,26 @@ console.log(
         features,
       };
     });
-console.log(
-  'DEBUG_DECISIONS',
-  JSON.stringify(
-    decisions.slice(0, 20).map((d) => ({
-      loan_id: d.loan_id,
-      last_req_status: d.features.last_req_status,
-      failed_message: d.features.failed_message,
-      intentos_ciclo_actual: d.features.intentos_ciclo_actual,
-      overdue_days: d.features.overdue_days,
-      total_amount_outstanding: d.features.total_amount_outstanding,
-      decision: d.decision,
-      decision_reason: d.decision_reason,
-    })),
-    null,
-    2
-  )
-);
+
+    // Opcional: debug
+    console.log(
+      'DEBUG_DECISIONS',
+      JSON.stringify(
+        decisions.slice(0, 20).map((d) => ({
+          loan_id: d.loan_id,
+          last_req_status: d.features.last_req_status,
+          failed_message: d.features.failed_message,
+          intentos_ciclo_actual: d.features.intentos_ciclo_actual,
+          overdue_days: d.features.overdue_days,
+          total_amount_outstanding: d.features.total_amount_outstanding,
+          decision: d.decision,
+          decision_reason: d.decision_reason,
+          confidence: d.confidence,
+        })),
+        null,
+        2
+      )
+    );
 
     return res.status(200).json({ decisions });
   } catch (err) {
