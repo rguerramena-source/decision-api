@@ -175,6 +175,23 @@ module.exports = async (req, res) => {
         features,
       };
     });
+console.log(
+  'DEBUG_DECISIONS',
+  JSON.stringify(
+    decisions.slice(0, 20).map((d) => ({
+      loan_id: d.loan_id,
+      last_req_status: d.features.last_req_status,
+      failed_message: d.features.failed_message,
+      intentos_ciclo_actual: d.features.intentos_ciclo_actual,
+      overdue_days: d.features.overdue_days,
+      total_amount_outstanding: d.features.total_amount_outstanding,
+      decision: d.decision,
+      decision_reason: d.decision_reason,
+    })),
+    null,
+    2
+  )
+);
 
     return res.status(200).json({ decisions });
   } catch (err) {
